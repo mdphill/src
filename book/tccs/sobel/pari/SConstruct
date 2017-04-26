@@ -1,0 +1,70 @@
+from rsf.proj import *
+from math import pi
+
+# 272,215,431
+gray = 'window f1=104 n1=1 | grey label1=IL label2=XL unit1= unit2= title=%s'
+white = 'window f1=104 n1=1 | grey allpos=y polarity=y label1=IL label2=XL unit1= unit2= title=%s'
+color = 'window f1=104 n1=1 | grey color=j scalebar=y label1=IL label2=XL unit1= unit2= title=%s barlabel=%s'
+segy = 'Parihaka_PSTM_full_angle.sgy'
+
+Fetch(segy,dir='PARIHAKA-3D',
+      server='https://s3.amazonaws.com',
+      top='open.source.geoscience/open_data/newzealand/Taranaiki_Basin')
+
+Flow('seis head',segy,'segyread tfile=${TARGETS[1]}')
+Flow('parihaka','seis head','intbin head=${SOURCES[1]} xk=iline yk=xline | put label2=IL label3=XL')
+Flow('sub','parihaka','window min1=1 max1=2.5 min2=2200 max2=2600 min3=4800 max3=5200')
+Result('sub',gray % '"Seismic data"')
+
+Flow('iflat','sub','grad3 dim=2 | smooth rect3=3')
+Flow('flat','sub iflat','grad3 dim=3 | smooth rect2=3 | math x=${SOURCES[1]} output="sqrt(input*input+x*x)"')
+Result('flat',white % '"Traditional Sobel"')
+
+Flow('dip','sub','fdip n4=2 rect1=10 rect2=5 rect3=5')
+Flow('idip','dip','window n4=1')
+Flow('xdip','dip','window f4=1')
+Flow('xdip23','xdip','transp plane=23')
+Result('idip',color % ('"IL Dip"','"Slope"') )
+Result('xdip',color % ('"XL Dip"','"Slope"') )
+
+Flow('pari','sub dip','pwspray2 dip=${SOURCES[1]} ns2=4 ns3=2 | transp | median')
+Result('pari',gray % "Seismic Data" )
+
+Flow('ipwd','pari idip','pwd n4=0 dip=${SOURCES[1]}')
+Flow('xpwd','pari xdip','pwd n4=1 dip=${SOURCES[1]}')
+Flow('isobel','ipwd xdip23','transp plane=23 | pwsmooth dip=${SOURCES[1]} ns=1 | transp plane=23')
+Flow('xsobel','xpwd idip','pwsmooth dip=${SOURCES[1]} ns=1')
+Result('isobel',white % '"IL Sobel"')
+Result('xsobel',white % '"XL Sobel"')
+
+Flow('sobel','isobel xsobel','math x=${SOURCES[1]} output="sqrt(input*input+x*x)"')
+Result('sobel','smooth rect1=3 | '+white % '"Plane-wave Sobel"')
+
+Flow('ipwd2','sobel idip','pwd n4=0 dip=${SOURCES[1]}')
+Flow('xpwd2','sobel xdip','pwd n4=1 dip=${SOURCES[1]}')
+Flow('isobel2','ipwd2 xdip23','transp plane=23 | pwsmooth dip=${SOURCES[1]} ns=1 | transp plane=23 | clip2 lower=0')
+Flow('xsobel2','xpwd2 idip','pwsmooth dip=${SOURCES[1]} ns=1 | clip2 lower=0')
+
+Flow('sobel2','isobel2 xsobel2','math x=${SOURCES[1]} output="input*input+x*x"')
+Result('sobel2','smooth rect1=3 | '+white % '"Plane-wave Sobel"' )
+
+sobels = []
+j = 0
+for i in range(0,360,4):
+    a = i*pi/180
+    sobel = 'sobel%d' % i
+    Flow(sobel,'isobel2 xsobel2','math x=${SOURCES[1]} output="abs(input*cos(%f)+x*sin(%f))" | transp plane=24' % (a,a) )
+    sobels.append(sobel)
+    j += 1
+Flow('sobels',sobels,'cat ${SOURCES[1:%d]} axis=2' % j )
+Flow('pick','sobels','put o2=0 d2=4 | scale axis=4 | pick vel0=180 an=1000000000 rect1=6 rect2=6 rect3=6')
+Result('pick',color % ('"Azimuth"','"Azimuth"')+' bias=180')
+
+Flow('slice','sobels pick','put o2=0 d2=4 | slice pick=${SOURCES[1]} | math output="input*input"')
+Result('slice','smooth rect1=3 | transp plane=23 | '+white % '"Cascaded Sobel"')
+
+Flow('mask','slice','smooth rect1=3 | mask min=1000 | dd type=float')
+Flow('az','pick mask','mul ${SOURCES[1]}')
+Result('az','window f1=104 n1=1 | transp | grey bias=180 minval=20 maxval=290 color=j scalebar=y title=Azimuth label1=IL label2=XL unit1= unit2= barlabel=Azimuth barunit=Degrees')
+
+End()
