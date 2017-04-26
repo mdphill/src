@@ -1,0 +1,141 @@
+from rsf.proj import *
+from math import pi
+
+gray = 'window f1=27 n1=1 | grey label1=IL label2=XL unit1= unit2= title=%s'
+white = 'window f1=27 n1=1 | grey allpos=y polarity=y label1=IL label2=XL unit1= unit2= title=%s'
+black = 'window f1=27 n1=1 | grey allpos=y label1=IL label2=XL unit1= unit2= title=%s'
+color = 'window f1=27 n1=1 | grey color=j scalebar=y label1=IL label2=XL unit1= unit2= barunit= title=%s barlabel=%s'
+
+# 190 55
+Fetch('penobscot_subset.bin','data',
+      server='https://github.com',
+      top='seg/tutorials-2015/raw/master/1512_Semblance_coherence_and_discontinuity/')
+
+Flow('pen','penobscot_subset.bin',
+     '''
+     echo in=$SOURCE n1=55 n2=200 n3=250
+     o1=0.116 d1=0.004 unit1=s label1=Time
+     o2=1253 d2=1 label2=Crossline
+     o3=1207 d3=1 label3=Inline
+     data_format=native_short |
+     dd type=float | transp plane=23
+     ''',stdin=0)
+Result('pen',gray % '"Seismic Data"')
+
+Flow('k','pen','rtoc | fft3 axis=2 pad=1 | fft3 axis=3 pad=1',split=[1,'omp'])
+Flow('mask','k','math output="abs(x3)" | real | mask max=.2 | dd type=float | smooth rect3=10')
+Flow('penobs','mask k','rtoc | mul ${SOURCES[1]} | fft3 axis=3 inv=y | fft3 axis=2 inv=y | real')
+Result('penobs',gray % '"Seismic data"')
+
+#############
+### SOBEL ###
+#############
+Flow('is','penobs','grad3 dim=2 | smooth rect3=3')
+Flow('s','penobs is','grad3 dim=3 | smooth rect2=3 | math x=${SOURCES[1]} output="input*input+x*x"')
+Result('s',white % '"Flat"')
+
+###############
+### PWSOBEL ###
+###############
+Flow('dip','penobs','fdip n4=2 rect1=3 rect2=20 rect3=10')
+Flow('idip','dip','window n4=1')
+Flow('xdip','dip','window f4=1')
+Flow('xdip23','xdip','transp plane=23')
+Result('idip',color % ('"IL Dip"','"Slope"') )
+Result('xdip',color % ('"XL Dip"','"Slope"') )
+
+Flow('pwsmooth','pen dip','pwspray2 dip=${SOURCES[1]} ns2=1 ns3=5 | transp | median')
+Result('pwsmooth',gray % '"Seismic data"')
+
+Flow('ipwd','pwsmooth idip','pwd dip=${SOURCES[1]} n4=0')
+Flow('xpwd','pwsmooth xdip','pwd dip=${SOURCES[1]} n4=1')
+Result('ipwd',gray % '"IL PWD"' )
+Result('xpwd',gray % '"XL PWD"' )
+
+Flow('isobel','ipwd xdip23','transp plane=23 | pwsmooth dip=${SOURCES[1]} ns=1 | transp plane=23')
+Flow('xsobel','xpwd idip','pwsmooth dip=${SOURCES[1]} ns=1')
+Result('isobel',white % '"IL Sobel"' )
+Result('xsobel',white % '"XL Sobel"' )
+
+Flow('sobel','isobel xsobel','math x=${SOURCES[1]} output="input*input+x*x"')
+Result('sobel','smooth rect1=3 | '+white % '"Plane-Wave Sobel"' )
+
+Flow('ipwd2','sobel idip','pwd dip=${SOURCES[1]} n4=0')
+Flow('xpwd2','sobel xdip','pwd dip=${SOURCES[1]} n4=1')
+Flow('isobel2','ipwd2 xdip23','transp plane=23 | pwsmooth dip=${SOURCES[1]} ns=1 | transp plane=23 | clip2 upper=0')
+Flow('xsobel2','xpwd2 idip','pwsmooth dip=${SOURCES[1]} ns=1 | clip2 upper=0')
+Flow('sobel2','isobel2 xsobel2','math x=${SOURCES[1]} output="input*input+x*x"')
+Result('sobel2','smooth rect1=3 | '+white % '"Cascade"' )
+
+sobels = []
+j = 0
+for a in range(-180,180,4):
+    ang = a*pi/180
+    sobel = 'sobel'+str(a)
+    Flow(sobel,'isobel xsobel','math x=${SOURCES[1]} output="abs(input*cos(%f)+x*sin(%f))" | transp plane=24' % (ang,ang) )
+    sobels.append(sobel)
+    j += 1
+
+Flow('sobels',sobels,'cat ${SOURCES[1:%d]} axis=2 | put o2=0 d2=4' % j )
+#Result('sobels','transp plane=24 | byte allpos=y polarity=y gainpanel=all | grey4 title="Azimuths" label2=IL unit2= label3=XL unit3= point1=.25 frame1=27 frame2=125 frame3=100')
+
+# 3D (T,AZ,IL,XL)
+Flow('pick3d','sobels','scale axis=4 | pick vel0=0 an=1000 rect1=3 rect2=10 rect3=10')
+Result('pick3d','window f1=27 n1=1 | transp | grey color=j scalebar=y bias=180 label1=IL label2=XL unit1= unit2= barunit= title=Azimuth barlabel=Azimuth')
+
+Flow('slice','sobels pick3d','slice pick=${SOURCES[1]} | math output="input*input"')
+Result('slice','smooth rect1=3 | window f1=27 n1=1 | transp | grey allpos=y polarity=y label1=IL label2=XL unit1= unit2= title=%s' % '"Phillips and Fomel (2017)"' )
+
+#####################
+##### COHERENCE #####
+#####################
+for case in range(3):
+    coh = 'coh%d' % case
+    Flow(coh,'pen','coherence mode=c%d twod=n' % (case+1))
+    Result(coh,black % ('"Bahorich and Farmer (1995)"','"Marfurt et al. (1998)"','"Gersztenkorn and Marfurt (1999)"')[case])
+
+# Gradient structure tensor
+
+Flow('dz','pen','deriv order=1')
+Flow('dx','pen','transp | deriv order=1 | transp')
+Flow('dy','pen','transp plane=23 | deriv order=1 | transp plane=23')
+
+Flow('grad','dz dx dy',
+     '''
+     cat axis=4 ${SOURCES[1:3]} | 
+     transp plane=34 | transp plane=23 | transp plane=12 | spray axis=2 n=1
+     ''')
+Flow('gradt','grad','transp')
+Flow('gst','grad gradt','matrix B=${SOURCES[1]} | smooth rect3=3 rect4=3 rect5=3')
+
+# Singular values
+
+Flow('eig','gst','svd')
+
+Flow('eig1','eig','window n1=1')
+Flow('eig2','eig','window n1=1 f1=1')
+
+Flow('coh','eig1 eig2','math l1=${SOURCES[0]} l2=${SOURCES[1]} output="(l1-l2)/(l1+l2)" ')
+
+Result('coh',black % '"Randen et al. (2000)"')
+
+# Dip estimation
+Flow('dip2','pwsmooth','dip rect1=5 rect2=20 rect3=20')
+Flow('pwspray','pwsmooth dip2','pwspray2 ns2=2 ns3=2 dip=${SOURCES[1]}')
+
+box=3
+
+Flow('pwdiff','pwsmooth pwspray',
+     'spray axis=2 n=25 | math s=${SOURCES[1]} output="(s-input)^2" ')
+
+Flow('pcoh','pwdiff',
+     '''
+     transp plane=12 | spray axis=2 n=1 | put n1=5 n2=5 | 
+     boxsmooth rect1=%d | boxsmooth rect2=%d | 
+     window f1=%d f2=%d | 
+     stack axis=2 min=y | stack axis=1 min=y 
+     ''' % (box,box,box-1,box-1))
+
+Result('pcoh',white % '"Karimi et al. (2015)"' )
+
+End()
